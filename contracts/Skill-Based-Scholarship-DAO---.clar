@@ -6,6 +6,9 @@
 (define-constant ERR-QUIZ-NOT-FOUND (err u105))
 (define-constant ERR-WRONG-ANSWER (err u106))
 (define-constant ERR-INSUFFICIENT-TOKENS (err u107))
+(define-constant ERR-ALREADY-REVIEWED (err u108))
+(define-constant ERR-NOT-REVIEWER (err u109))
+(define-constant ERR-INSUFFICIENT-REVIEWS (err u110))
 
 (define-fungible-token governance-token)
 
@@ -14,6 +17,7 @@
 (define-data-var quiz-count uint u0)
 (define-data-var min-tokens-to-vote uint u10)
 (define-data-var voting-period uint u144)
+(define-data-var min-reviews-required uint u3)
 
 (define-map proposals
     uint 
@@ -24,7 +28,10 @@
         yes-votes: uint,
         no-votes: uint,
         end-block: uint,
-        executed: bool
+        executed: bool,
+        approved-reviews: uint,
+        rejected-reviews: uint,
+        review-complete: bool
     }
 )
 
@@ -44,6 +51,16 @@
 
 (define-map user-quiz-completion
     {quiz-id: uint, user: principal}
+    bool
+)
+
+(define-map proposal-reviews
+    {proposal-id: uint, reviewer: principal}
+    bool
+)
+
+(define-map authorized-reviewers
+    principal
     bool
 )
 
@@ -70,7 +87,10 @@
                 yes-votes: u0,
                 no-votes: u0,
                 end-block: end-block,
-                executed: false
+                executed: false,
+                approved-reviews: u0,
+                rejected-reviews: u0,
+                review-complete: false
             }
         )
         (var-set proposal-count proposal-id)
@@ -86,6 +106,7 @@
         )
         (asserts! (>= voter-balance (var-get min-tokens-to-vote)) ERR-INSUFFICIENT-TOKENS)
         (asserts! (< stacks-block-height (get end-block proposal)) ERR-PROPOSAL-EXPIRED)
+        (asserts! (get review-complete proposal) ERR-INSUFFICIENT-REVIEWS)
         (asserts! (not (default-to false (map-get? user-votes {proposal-id: proposal-id, voter: tx-sender}))) ERR-ALREADY-VOTED)
         
         (map-set user-votes {proposal-id: proposal-id, voter: tx-sender} true)
@@ -153,4 +174,60 @@
 
 (define-read-only (get-user-quiz-status (quiz-id uint) (user principal))
     (ok (default-to false (map-get? user-quiz-completion {quiz-id: quiz-id, user: user})))
+)
+
+(define-public (add-reviewer (reviewer principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get dao-admin)) ERR-NOT-AUTHORIZED)
+        (map-set authorized-reviewers reviewer true)
+        (ok true)
+    )
+)
+
+(define-public (remove-reviewer (reviewer principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get dao-admin)) ERR-NOT-AUTHORIZED)
+        (map-delete authorized-reviewers reviewer)
+        (ok true)
+    )
+)
+
+(define-public (review-proposal (proposal-id uint) (approve bool))
+    (let
+        (
+            (proposal (unwrap! (map-get? proposals proposal-id) ERR-PROPOSAL-NOT-FOUND))
+            (is-reviewer (default-to false (map-get? authorized-reviewers tx-sender)))
+        )
+        (asserts! is-reviewer ERR-NOT-REVIEWER)
+        (asserts! (not (default-to false (map-get? proposal-reviews {proposal-id: proposal-id, reviewer: tx-sender}))) ERR-ALREADY-REVIEWED)
+        
+        (map-set proposal-reviews {proposal-id: proposal-id, reviewer: tx-sender} true)
+        
+        (let
+            (
+                (updated-proposal
+                    (if approve
+                        (merge proposal {approved-reviews: (+ (get approved-reviews proposal) u1)})
+                        (merge proposal {rejected-reviews: (+ (get rejected-reviews proposal) u1)})
+                    )
+                )
+                (total-reviews (+ (get approved-reviews updated-proposal) (get rejected-reviews updated-proposal)))
+            )
+            (map-set proposals proposal-id updated-proposal)
+            
+            (if (>= total-reviews (var-get min-reviews-required))
+                (map-set proposals proposal-id (merge updated-proposal {review-complete: true}))
+                true
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-read-only (get-reviewer-status (reviewer principal))
+    (ok (default-to false (map-get? authorized-reviewers reviewer)))
+)
+
+(define-read-only (get-proposal-review-status (proposal-id uint) (reviewer principal))
+    (ok (default-to false (map-get? proposal-reviews {proposal-id: proposal-id, reviewer: reviewer})))
 )
