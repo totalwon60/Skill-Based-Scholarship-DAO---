@@ -9,6 +9,8 @@
 (define-constant ERR-ALREADY-REVIEWED (err u108))
 (define-constant ERR-NOT-REVIEWER (err u109))
 (define-constant ERR-INSUFFICIENT-REVIEWS (err u110))
+(define-constant ERR-CANNOT-DELEGATE-TO-SELF (err u111))
+(define-constant ERR-DELEGATION-CYCLE (err u112))
 
 (define-fungible-token governance-token)
 
@@ -64,6 +66,16 @@
     bool
 )
 
+(define-map vote-delegations
+    principal
+    principal
+)
+
+(define-map delegation-counts
+    principal
+    uint
+)
+
 (define-public (initialize (admin principal))
     (begin
         (asserts! (is-eq tx-sender (var-get dao-admin)) ERR-NOT-AUTHORIZED)
@@ -103,6 +115,8 @@
         (
             (proposal (unwrap! (map-get? proposals proposal-id) ERR-PROPOSAL-NOT-FOUND))
             (voter-balance (ft-get-balance governance-token tx-sender))
+            (delegated-power (default-to u0 (map-get? delegation-counts tx-sender)))
+            (total-voting-power (+ voter-balance delegated-power))
         )
         (asserts! (>= voter-balance (var-get min-tokens-to-vote)) ERR-INSUFFICIENT-TOKENS)
         (asserts! (< stacks-block-height (get end-block proposal)) ERR-PROPOSAL-EXPIRED)
@@ -112,8 +126,8 @@
         (map-set user-votes {proposal-id: proposal-id, voter: tx-sender} true)
         
         (if vote
-            (map-set proposals proposal-id (merge proposal {yes-votes: (+ (get yes-votes proposal) u1)}))
-            (map-set proposals proposal-id (merge proposal {no-votes: (+ (get no-votes proposal) u1)}))
+            (map-set proposals proposal-id (merge proposal {yes-votes: (+ (get yes-votes proposal) total-voting-power)}))
+            (map-set proposals proposal-id (merge proposal {no-votes: (+ (get no-votes proposal) total-voting-power)}))
         )
         (ok true)
     )
@@ -230,4 +244,66 @@
 
 (define-read-only (get-proposal-review-status (proposal-id uint) (reviewer principal))
     (ok (default-to false (map-get? proposal-reviews {proposal-id: proposal-id, reviewer: reviewer})))
+)
+
+(define-public (delegate-voting-power (delegate-to principal))
+    (let
+        (
+            (current-delegate (map-get? vote-delegations tx-sender))
+            (delegator-balance (ft-get-balance governance-token tx-sender))
+        )
+        (asserts! (not (is-eq tx-sender delegate-to)) ERR-CANNOT-DELEGATE-TO-SELF)
+        (asserts! (is-none (map-get? vote-delegations delegate-to)) ERR-DELEGATION-CYCLE)
+        (asserts! (> delegator-balance u0) ERR-INSUFFICIENT-TOKENS)
+        
+        (match current-delegate
+            old-delegate
+            (let
+                ((old-count (default-to u0 (map-get? delegation-counts old-delegate))))
+                (if (> old-count u0)
+                    (map-set delegation-counts old-delegate (- old-count delegator-balance))
+                    true
+                )
+            )
+            true
+        )
+        
+        (let
+            ((new-count (default-to u0 (map-get? delegation-counts delegate-to))))
+            (map-set delegation-counts delegate-to (+ new-count delegator-balance))
+        )
+        
+        (map-set vote-delegations tx-sender delegate-to)
+        (ok true)
+    )
+)
+
+(define-public (revoke-delegation)
+    (let
+        (
+            (current-delegate (unwrap! (map-get? vote-delegations tx-sender) ERR-NOT-AUTHORIZED))
+            (delegator-balance (ft-get-balance governance-token tx-sender))
+            (current-count (default-to u0 (map-get? delegation-counts current-delegate)))
+        )
+        (if (> current-count u0)
+            (map-set delegation-counts current-delegate (- current-count delegator-balance))
+            true
+        )
+        (map-delete vote-delegations tx-sender)
+        (ok true)
+    )
+)
+
+(define-read-only (get-delegate (delegator principal))
+    (ok (map-get? vote-delegations delegator))
+)
+
+(define-read-only (get-voting-power (voter principal))
+    (let
+        (
+            (token-balance (ft-get-balance governance-token voter))
+            (delegated-power (default-to u0 (map-get? delegation-counts voter)))
+        )
+        (ok (+ token-balance delegated-power))
+    )
 )
